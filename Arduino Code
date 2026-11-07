@@ -1,0 +1,97 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// LCD-Display Setup (Adresse überprüfen, oft 0x27 oder 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Konstanten für Rad und Messung 
+const float wheelDiameter = 0.50f;               // Raddurchmesser in Metern
+const float wheelCircumference = wheelDiameter * PI;  // PI ist in Arduino definiert
+const unsigned long debounceMicros = 20000UL;     // Entprellzeit 20 ms
+const unsigned long stopThreshold = 1000000UL;    // Stillstandsschwelle 1s
+const float maxReasonableSpeed = 100.0f;         // Maximal plausible Geschwindigkeit (km/h)
+
+volatile unsigned long lastPulseMicros = 0;      // Zeit des letzten Impulses
+volatile float currentSpeedKmh = 0.0f;           // Aktuelle Geschwindigkeit
+
+// Interrupt Service Routine (ISR)
+void onPulse() {
+  unsigned long currentTime = micros();
+  
+  // Überlaufschutz
+  unsigned long interval = (currentTime >= lastPulseMicros) ? 
+                         (currentTime - lastPulseMicros) : 
+                         ((unsigned long)-1 - lastPulseMicros + currentTime);
+  
+  if (interval >= debounceMicros) {
+    if (interval > 0) {
+      float intervalSeconds = interval / 1000000.0f;
+      float calculatedSpeed = (wheelCircumference / intervalSeconds) * 3.6f;
+      
+      // Plausibilitätsprüfung
+      if (calculatedSpeed <= maxReasonableSpeed) {
+        currentSpeedKmh = calculatedSpeed;
+        lastPulseMicros = currentTime;
+        
+        // Debug-LED (optional)
+        static bool ledState = false;
+        ledState = !ledState;
+        digitalWrite(3, ledState);
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(2, INPUT_PULLUP);
+  pinMode(3, OUTPUT);
+  
+  // Interrupt-Anmeldung
+  if (digitalPinToInterrupt(2) != NOT_AN_INTERRUPT) {
+    attachInterrupt(digitalPinToInterrupt(2), onPulse, FALLING);
+  } else {
+    Serial.println("Fehler: Falscher Interrupt-Pin!");
+  }
+  
+  // LCD initialisieren
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Geschwindigkeit:");
+}
+
+void loop() {
+  static unsigned long lastPrint = 0;
+  const unsigned long printInterval = 250;  // Update-Intervall in ms
+  
+  if (millis() - lastPrint >= printInterval) {
+    lastPrint = millis();
+    
+    // Kritische Abschnitte schützen
+    noInterrupts();
+    float speed = currentSpeedKmh;
+    unsigned long lastTime = lastPulseMicros;
+    interrupts();
+    
+    // Stillstand erkennen mit Überlaufschutz
+    unsigned long currentMicros = micros();
+    unsigned long timeSinceLastPulse = (currentMicros >= lastTime) ? 
+                                     (currentMicros - lastTime) : 
+                                     ((unsigned long)-1 - lastTime + currentMicros);
+    
+    if (timeSinceLastPulse > stopThreshold) {
+      speed = 0.0f;
+    }
+    
+    // Ausgabe auf Serial und LCD
+    Serial.print("Geschwindigkeit: ");
+    Serial.print(speed, 2);
+    Serial.println(" km/h");
+    
+    // LCD-Ausgabe
+    lcd.setCursor(0, 1);
+    lcd.print(speed, 2);
+    lcd.print(" km/h    ");
+  }
+}
